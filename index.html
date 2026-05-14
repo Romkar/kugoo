@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kugoo BLE Manager + Full Duplex Log</title>
+    <style>
+        body { font-family: sans-serif; padding: 15px; text-align: center; background: #121212; color: #e0e0e0; margin: 0; }
+        .card { max-width: 500px; margin: 10px auto; background: #1e1e1e; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); border: 1px solid #2d2d2d; text-align: left; }
+        h2 { text-align: center; color: #fff; margin-top: 0; font-size: 22px; }
+        button { padding: 14px; font-size: 16px; color: white; border: none; border-radius: 6px; cursor: pointer; width: 100%; margin-top: 10px; font-weight: bold; transition: background 0.2s; }
+        #connectBtn { background: #28a745; }
+        #connectBtn:hover { background: #218838; }
+        #sendBtn { background: #007bff; }
+        #sendBtn:hover { background: #0069d9; }
+        button:disabled { background: #444 !important; color: #888; cursor: not-allowed; }
+        label { font-size: 14px; color: #aaa; display: block; margin-top: 15px; margin-bottom: 5px; }
+        input { padding: 12px; font-size: 18px; width: 100%; text-align: center; box-sizing: border-box; border: 1px solid #333; border-radius: 6px; background: #2d2d2d; color: #fff; letter-spacing: 2px; }
+        input:focus { border-color: #007bff; outline: none; }
+        .info-box { background: #252525; padding: 12px; border-radius: 6px; margin-top: 15px; font-size: 13px; border-left: 4px solid #888; }
+        .uuid-val { font-family: monospace; color: #ff79c6; font-weight: bold; word-break: break-all; }
+        
+        .log-header { font-size: 14px; color: #aaa; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
+        #clearLogBtn { width: auto; padding: 4px 8px; font-size: 11px; background: #333; margin: 0; }
+        #log { margin-top: 5px; color: #f8f9fa; font-family: 'Courier New', monospace; white-space: pre-wrap; text-align: left; font-size: 12px; height: 220px; overflow-y: auto; background: #000; padding: 12px; border-radius: 6px; border: 1px solid #333; box-sizing: border-box; }
+        
+        .log-time { color: #6272a4; }
+        .log-info { color: #8be9fd; }
+        .log-success { color: #50fa7b; }
+        .log-warn { color: #ffb86c; }
+        .log-error { color: #ff5555; }
+        /* Новый стиль для ответов самого самоката */
+        .log-incoming { color: #bd93f9; font-weight: bold; } 
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>ПИН-код Kugoo Kirin</h2>
+    
+    <div class="info-box" id="statusBox">
+        <strong>Определенные UUID:</strong><br>
+        Сервис: <span id="foundService" class="uuid-val">Ожидание...</span><br>
+        Запись (TX): <span id="foundChar" class="uuid-val">Ожидание...</span><br>
+        Чтение (RX): <span id="foundReadChar" class="uuid-val">Ожидание...</span>
+    </div>
+
+    <label for="pwdInput">Новый 4-значный ПИН-код блокировки:</label>
+    <input type="text" id="pwdInput" maxlength="4" placeholder="1234" value="1234">
+    
+    <button id="connectBtn">1. Сканировать и определить UUID</button>
+    <button id="sendBtn" disabled>2. Отправить на самокат</button>
+    
+    <div class="log-header">
+        <span>Лог работы (включая ответы самоката):</span>
+        <button id="clearLogBtn">Очистить лог</button>
+    </div>
+    <div id="log"></div>
+</div>
+
+<script>
+// Списки UUID из прошивки LFBluetootService.java
+const KNOWN_SERVICES = [
+    '9546bdc0-60ba-11e9-8647-0002a5d5c51b', // deviceService
+    'b1b99ca0-98e7-11e9-80fe-0002a5d5c51b', // deviceService_kugoo
+    '331023c0-fdcb-11e8-8eb2-0002a5d5c51b'  // deviceService_fmi
+];
+
+const KNOWN_WRITE_CHARACTERISTICS = [
+    '9546bdc1-60ba-11e9-8647-0002a5d5c51b', // writeUUID
+    'b1b99ca1-98e7-11e9-80fe-0002a5d5c51b', // writeUUID_kugoo
+    '331023c1-fdcb-11e8-8eb2-0002a5d5c51b'  // writeUUID_fmi
+];
+
+const KNOWN_READ_CHARACTERISTICS = [
+    '9546bdc4-60ba-11e9-8647-0002a5d5c51b', // readUUID
+    'b1b99ca4-98e7-11e9-80fe-0002a5d5c51b', // readUUID_kugoo
+    '331023c4-fdcb-11e8-8eb2-0002a5d5c51b'  // readUUID_fmi
+];
+
+let writeCharacteristic = null;
+let readCharacteristic = null;
+let connectedDevice = null;
+
+const connectBtn = document.getElementById('connectBtn');
+const sendBtn = document.getElementById('sendBtn');
+const pwdInput = document.getElementById('pwdInput');
+const logDiv = document.getElementById('log');
+const clearLogBtn = document.getElementById('clearLogBtn');
+const statusBox = document.getElementById('statusBox');
+
+function writeLog(text, type = 'info') {
+    const timeStr = new Date().toLocaleTimeString();
+    const row = document.createElement('div');
+    
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'log-time';
+    timeSpan.textContent = `[${timeStr}] `;
+    
+    const textSpan = document.createElement('span');
+    textSpan.className = `log-${type}`;
+    textSpan.textContent = text;
+    
+    row.appendChild(timeSpan);
+    row.appendChild(textSpan);
+    logDiv.appendChild(row);
+    logDiv.scrollTop = logDiv.scrollHeight;
+    console.log(`[${type.toUpperCase()}] ${text}`);
+}
+
+clearLogBtn.addEventListener('click', () => {
+    logDiv.innerHTML = '';
+    writeLog("Лог очищен", "info");
+});
+
+// Обработчик входящих данных от самоката (Аналог onCharacteristicChanged из Java)
+function handleScooterNotification(event) {
+    const value = event.target.value;
+    const decoder = new TextDecoder('utf-8');
+    const receivedString = decoder.decode(value).trim();
+    
+    // Выводим сырой ответ фиолетовым цветом
+    writeLog(`◄ [ОТВЕТ САМОКАТА]: "${receivedString}"`, "incoming");
+
+    // Интеллектуальный анализ ответа на основе кода приложения
+    if (receivedString.includes("CODE_OK")) {
+        writeLog("АНАЛИЗ: Авторизация успешна / старый пароль верный! (CODE_OK)", "success");
+    } else if (receivedString.includes("CODE_NG")) {
+        writeLog("АНАЛИЗ: Ошибка авторизации / неверный старый пароль! (CODE_NG)", "error");
+    } else if (receivedString.includes("OK")) {
+        writeLog("АНАЛИЗ: Контроллер подтвердил выполнение команды!", "success");
+    }
+}
+
+// Шаг 1: Подключение, детекция UUID и запуск прослушивания
+connectBtn.addEventListener('click', async () => {
+    try {
+        writeCharacteristic = null;
+        readCharacteristic = null;
+        sendBtn.disabled = true;
+        statusBox.style.borderLeftColor = "#888";
+        document.getElementById('foundService').textContent = "Поиск...";
+        document.getElementById('foundChar').textContent = "Поиск...";
+        document.getElementById('foundReadChar').textContent = "Поиск...";
+
+        writeLog("Запрос доступа к Bluetooth. Выберите ваш Kugoo...", "info");
+        
+        const device = await navigator.bluetooth.requestDevice({
+            acceptAllDevices: true,
+            optionalServices: KNOWN_SERVICES
+        });
+
+        connectedDevice = device;
+        writeLog(`Выбрано устройство: ${device.name || 'Без имени'}`, "success");
+        writeLog(`Подключение к GATT-серверу...`, "info");
+        
+        const server = await device.gatt.connect();
+        writeLog("Подключено к GATT. Поиск каналов связи Kugoo...", "success");
+
+        let successService = null;
+        let successWriteChar = null;
+        let successReadChar = null;
+
+        for (const serviceUuid of KNOWN_SERVICES) {
+            try {
+                const service = await server.getPrimaryService(serviceUuid);
+                successService = serviceUuid;
+                
+                // Ищем характеристику для записи (TX)
+                for (const charUuid of KNOWN_WRITE_CHARACTERISTICS) {
+                    try {
+                        writeCharacteristic = await service.getCharacteristic(charUuid);
+                        successWriteChar = charUuid;
+                        break;
+                    } catch (e) {}
+                }
+
+                // Ищем характеристику для чтения ответов (RX)
+                for (const charUuid of KNOWN_READ_CHARACTERISTICS) {
+                    try {
+                        readCharacteristic = await service.getCharacteristic(charUuid);
+                        successReadChar = charUuid;
+                        break;
+                    } catch (e) {}
+                }
+
+                if (writeCharacteristic && readCharacteristic) break;
+            } catch (e) {}
+        }
+
+        if (writeCharacteristic && readCharacteristic) {
+            document.getElementById('foundService').textContent = successService;
+            document.getElementById('foundChar').textContent = successWriteChar;
+            document.getElementById('foundReadChar').textContent = successReadChar;
+            statusBox.style.borderLeftColor = "#50fa7b";
+
+            writeLog("Включение нотификаций для получения ответов от самоката...", "info");
+            // Включаем уведомления (аналог setCharacteristicNotification в Android)
+            await readCharacteristic.startNotifications();
+            readCharacteristic.addEventListener('characteristicvaluechanged', handleScooterNotification);
+            writeLog("Канал получения ответов успешно активирован!", "success");
+
+            writeLog("Все UUID определены. Можно отправлять новый ПИН-код.", "success");
+            sendBtn.disabled = false;
+        } else {
+            document.getElementById('foundService').textContent = "Не найден";
+            document.getElementById('foundChar').textContent = "Не найден";
+            document.getElementById('foundReadChar').textContent = "Не найден";
+            statusBox.style.borderLeftColor = "#ff5555";
+            writeLog("ОШИБКА: Каналы чтения/записи Kugoo Kirin не обнаружены.", "error");
+            if (device.gatt.connected) device.gatt.disconnect();
+        }
+
+    } catch (error) {
+        statusBox.style.borderLeftColor = "#ff5555";
+        writeLog(`Критическая ошибка: ${error.message}`, "error");
+    }
+});
+
+// Шаг 2: Отправка команды
+sendBtn.addEventListener('click', async () => {
+    const pin = pwdInput.value.trim();
+    
+    if (pin.length !== 4 || isNaN(pin)) {
+        writeLog("Отмена отправки: Пароль должен содержать 4 цифры.", "warn");
+        return;
+    }
+
+    const commandString = `LKSC+${pin}`;
+    writeLog(`► НА ПРОВОДЕ (ОТПРАВКА): "${commandString}"`, "info");
+
+    try {
+        const encoder = new TextEncoder();
+        const dataBuffer = encoder.encode(commandString);
+
+        await writeCharacteristic.writeValueWithResponse(dataBuffer);
+        writeLog(`Команда отправлена. Ожидаем ответ от контроллера в логе ниже...`, "info");
+
+        // ПРИМЕЧАНИЕ: Мы намеренно НЕ отключаем устройство (device.disconnect) сразу после отправки,
+        // чтобы успеть принять и отобразить входящий ответ от самоката.
+        
+    } catch (error) {
+        writeLog(`Ошибка при отправке: ${error.message}`, "error");
+    }
+});
+</script>
+</body>
+</html>
