@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kugoo Kirin R1 BLE Control</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background: #f4f4f4; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); max-width: 400px; margin: auto; }
+        button { width: 100%; padding: 12px; margin: 8px 0; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; }
+        .btn-blue { background: #007bff; color: white; }
+        .btn-green { background: #28a745; color: white; }
+        input { width: 100%; padding: 10px; margin: 8px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        #log { background: #222; color: #00ff00; padding: 10px; border-radius: 4px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 15px; }
+        .status { font-weight: bold; color: #dc3545; text-align: center; margin: 10px 0; }
+        .status.ok { color: #28a745; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h3>Управление Kugoo Kirin R1</h3>
+    
+    <!-- Шаг 0: Локальный пароль для защиты самого HTML интерфейса -->
+    <label for="html_pass">1. Введите пароль доступа к Bluetooth самоката:</label>
+    <input type="password" id="html_pass" placeholder="Введите ваш текущий BLE пароль (6 цифр)" maxlength="6">
+
+    <div id="status_label" class="status">Статус: Отключено</div>
+
+    <button class="btn-blue" onclick="connectAndAuth()">1. Подключиться и Авторизоваться</button>
+    
+    <hr>
+    
+    <label for="new_pin">2. Новый ПИН-код блокировки колес (4 цифры):</label>
+    <input type="text" id="new_pin" placeholder="Например: 7777" maxlength="4">
+    <button class="btn-green" onclick="changeLockPin()">2. Отправить новый ПИН на самокат</button>
+
+    <h4>Лог работы:</h4>
+    <div id="log"></div>
+</div>
+
+<script>
+let bleDevice = null;
+let gattServer = null;
+let writeCharacteristic = null;
+
+// UUID из официального приложения Kugoo для отправки команд (TX)
+const SERVICE_UUID = "b1b99ca0-98e7-11e9-80fe-0002a5d5c51b"; 
+const WRITE_UUID   = "b1b99ca1-98e7-11e9-80fe-0002a5d5c51b";
+
+function log(text) {
+    const logDiv = document.getElementById('log');
+    logDiv.innerHTML += `> ${text}<br>`;
+    logDiv.scrollTop = logDiv.scrollHeight;
+}
+
+function updateStatus(text, isOk = false) {
+    const statusLabel = document.getElementById('status_label');
+    statusLabel.innerText = "Статус: " + text;
+    if (isOk) {
+        statusLabel.classList.add('ok');
+    } else {
+        statusLabel.classList.remove('ok');
+    }
+}
+
+// Перевод строки в массив байт (UTF-8)
+function stringToBytes(str) {
+    return new TextEncoder().encode(str);
+}
+
+async function connectAndAuth() {
+    const passInput = document.getElementById('html_pass').value.trim();
+    
+    // Проверка ввода
+    if (passInput.length !== 6 || isNaN(passInput)) {
+        alert("Ошибка: Для авторизации на самокате необходимо ввести 6-значный цифровой пароль!");
+        log("Авторизация отклонена: неверный формат пароля.");
+        return;
+    }
+
+    try {
+        log("Запуск сканирования BLE устройств...");
+        bleDevice = await navigator.bluetooth.requestDevice({
+            filters: [{ namePrefix: 'Kugoo' }, { namePrefix: 'Kirin' }],
+            optionalServices: [SERVICE_UUID]
+        });
+
+        log(`Устройство найдено: ${bleDevice.name}. Подключение...`);
+        gattServer = await bleDevice.gatt.connect();
+        
+        log("Поиск сервисов управления...");
+        const service = await gattServer.getPrimaryService(SERVICE_UUID);
+        writeCharacteristic = await service.getCharacteristic(WRITE_UUID);
+        
+        // --- ЭТАП АВТОРИЗАЦИИ (Имитация официального приложения) ---
+        log(`Отправка команды авторизации CODE=${passInput}...`);
+        const authCmd = stringToBytes("CODE=" + passInput);
+        await writeCharacteristic.writeValue(authCmd);
+        
+        log("Команда авторизации отправлена успешно!");
+        updateStatus("Подключен и Авторизован", true);
+        
+    } catch (error) {
+        log(`Ошибка подключения: ${error.message}`);
+        updateStatus("Ошибка соединения");
+    }
+}
+
+async function changeLockPin() {
+    if (!writeCharacteristic) {
+        alert("Сначала необходимо успешно подключиться и авторизоваться на Шаге 1!");
+        return;
+    }
+
+    const newPin = document.getElementById('new_pin').value.trim();
+    if (newPin.length !== 4 || isNaN(newPin)) {
+        alert("ПИН-код блокировки должен состоять строго из 4 цифр!");
+        return;
+    }
+
+    try {
+        log(`Отправка команды смены ПИН-кода: LKSC+${newPin}...`);
+        const lockCmd = stringToBytes("LKSC+" + newPin);
+        await writeCharacteristic.writeValue(lockCmd);
+        log("АНАЛИЗ: Команда LKSC отправлена. Проверьте реакцию самоката.");
+    } catch (error) {
+        log(`Ошибка отправки команды: ${error.message}`);
+    }
+}
+</script>
+
+</body>
+</html>
