@@ -44,10 +44,6 @@ let bleDevice = null;
 let gattServer = null;
 let writeCharacteristic = null;
 
-// UUID из официального приложения Kugoo для отправки команд (TX)
-const SERVICE_UUID = "b1b99ca0-98e7-11e9-80fe-0002a5d5c51b"; 
-const WRITE_UUID   = "b1b99ca1-98e7-11e9-80fe-0002a5d5c51b";
-
 function log(text) {
     const logDiv = document.getElementById('log');
     logDiv.innerHTML += `> ${text}<br>`;
@@ -57,75 +53,94 @@ function log(text) {
 function updateStatus(text, isOk = false) {
     const statusLabel = document.getElementById('status_label');
     statusLabel.innerText = "Статус: " + text;
-    if (isOk) {
-        statusLabel.classList.add('ok');
-    } else {
-        statusLabel.classList.remove('ok');
-    }
+    if (isOk) { statusLabel.classList.add('ok'); } else { statusLabel.classList.remove('ok'); }
 }
 
-// Перевод строки в массив байт (UTF-8)
 function stringToBytes(str) {
     return new TextEncoder().encode(str);
 }
 
 async function connectAndAuth() {
     const passInput = document.getElementById('html_pass').value.trim();
-    
-    // Проверка ввода
     if (passInput.length !== 6 || isNaN(passInput)) {
-        alert("Ошибка: Для авторизации на самокате необходимо ввести 6-значный цифровой пароль!");
-        log("Авторизация отклонена: неверный формат пароля.");
+        alert("Ошибка: Введите 6-значный цифровой пароль!");
         return;
     }
 
     try {
-        log("Запуск сканирования BLE устройств...");
+        log("Запуск сканирования ВСЕХ сервисов самоката...");
+        
+        // requestDevice без фильтра по конкретному UUID, чтобы увидеть всё
         bleDevice = await navigator.bluetooth.requestDevice({
             filters: [{ namePrefix: 'Kugoo' }, { namePrefix: 'Kirin' }],
-            optionalServices: [SERVICE_UUID]
+            acceptAllDevices: false,
+            optionalServices: [] // Оставляем пустым, Chrome запросит базовые, либо используем хак ниже
         });
 
-        log(`Устройство найдено: ${bleDevice.name}. Подключение...`);
+        // ХАК ДЛЯ CHROME: Чтобы заставить его искать вообще все сервисы, 
+        // если верхний вариант выдаст ошибку, используйте acceptAllDevices: true ниже (вместо верхнего requestDevice):
+        /*
+        bleDevice = await navigator.bluetooth.requestDevice({
+            acceptAllDevices: true
+        });
+        */
+
+        log(`Подключение к ${bleDevice.name}...`);
         gattServer = await bleDevice.gatt.connect();
         
-        log("Поиск сервисов управления...");
-        const service = await gattServer.getPrimaryService(SERVICE_UUID);
-        writeCharacteristic = await service.getCharacteristic(WRITE_UUID);
+        log("Поиск абсолютно всех первичных сервисов (GATT)...");
+        const services = await gattServer.getPrimaryServices();
         
-        // --- ЭТАП АВТОРИЗАЦИИ (Имитация официального приложения) ---
-        log(`Отправка команды авторизации CODE=${passInput}...`);
-        const authCmd = stringToBytes("CODE=" + passInput);
-        await writeCharacteristic.writeValue(authCmd);
-        
-        log("Команда авторизации отправлена успешно!");
-        updateStatus("Подключен и Авторизован", true);
+        if (services.length === 0) {
+            log("Ошибка: На устройстве не найдено открытых GATT-сервисов!");
+            return;
+        }
+
+        log(`Найдено сервисов: ${services.length}. Список UUID:`);
+        for (let service of services) {
+            log(`[Сервис] UUID: ${service.uuid}`);
+            
+            // Пробуем получить характеристики этого сервиса
+            try {
+                let characteristics = await service.getCharacteristics();
+                for (let char of characteristics) {
+                    log(`   └─ [Характеристика] UUID: ${char.uuid} (Write: ${char.properties.write})`);
+                    // Если нашли характеристику с правами на запись, запоминаем её как рабочую
+                    if (char.properties.write || char.properties.writeWithoutResponse) {
+                        writeCharacteristic = char;
+                    }
+                }
+            } catch(e) {}
+        }
+
+        if (writeCharacteristic) {
+            log(`Автоматически выбрана рабочая характеристика: ${writeCharacteristic.uuid}`);
+            log(`Отправка CODE=${passInput}...`);
+            await writeCharacteristic.writeValue(stringToBytes("CODE=" + passInput));
+            log("Авторизация отправлена!");
+            updateStatus("Подключен", true);
+        } else {
+            log("Не найдено подходящей характеристики для записи (TX)!");
+        }
         
     } catch (error) {
-        log(`Ошибка подключения: ${error.message}`);
+        log(`Ошибка: ${error.message}`);
         updateStatus("Ошибка соединения");
     }
 }
 
 async function changeLockPin() {
     if (!writeCharacteristic) {
-        alert("Сначала необходимо успешно подключиться и авторизоваться на Шаге 1!");
+        alert("Сначала авторизуйтесь!");
         return;
     }
-
     const newPin = document.getElementById('new_pin').value.trim();
-    if (newPin.length !== 4 || isNaN(newPin)) {
-        alert("ПИН-код блокировки должен состоять строго из 4 цифр!");
-        return;
-    }
-
     try {
-        log(`Отправка команды смены ПИН-кода: LKSC+${newPin}...`);
-        const lockCmd = stringToBytes("LKSC+" + newPin);
-        await writeCharacteristic.writeValue(lockCmd);
-        log("АНАЛИЗ: Команда LKSC отправлена. Проверьте реакцию самоката.");
+        log(`Отправка LKSC+${newPin}...`);
+        await writeCharacteristic.writeValue(stringToBytes("LKSC+" + newPin));
+        log("Выполнено!");
     } catch (error) {
-        log(`Ошибка отправки команды: ${error.message}`);
+        log(`Ошибка: ${error.message}`);
     }
 }
 </script>
